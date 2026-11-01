@@ -84,9 +84,18 @@ class PaperEngine{
  }
  if(this.locked||this.approvalRequired||!tradingTime({...quotes[0],timestamp:time}))return;
  for(const q of quotes){const id=q.index+'|'+q.side;if(this.disarmed.has(id)&&((q.side==='CE'&&q.close<q.ema20)||(q.side==='PE'&&q.close>q.ema20))){this.disarmed.delete(id);this.log(time,'RESET','New signal rearmed',{index:q.index,side:q.side});}}
- const ranked=quotes.map(q=>({q,d:decision(q,quotes)})).sort((a,b)=>b.d.score-a.d.score||b.d.greekScore-a.d.greekScore);
- for(const {q,d} of ranked){if(!d.eligible)continue;if(this.disarmed.has(q.index+'|'+q.side))continue;const z=this.size(q);if(!z.qty){this.log(time,'RISK_REJECTED','No affordable whole-lot trade within remaining ₹500 risk budget',{index:q.index,side:q.side,strike:q.strike});continue;}
- const c={index:q.index,side:q.side,strike:q.strike,expiry:q.expiry};this.pending={contract:c,time,limit:q.ask,qty:z.qty,initialStop:z.stop,entryFacts:facts(q,d)};this.disarmed.add(q.index+'|'+q.side);this.log(time,'PAPER_LIMIT_CREATED','Pending BUY limit; no real order',{index:q.index,side:q.side,strike:q.strike,qty:z.qty,limit:q.ask,stop:z.stop,plannedRisk:z.risk,signal:this.pending.entryFacts});return;}
+ // Determine market direction from the weighted signal model; choose strikes within each
+ // index+direction STRICTLY by the Delta/Gamma ranking. Risk and capital remain vetoes.
+ const valid=quotes.map(q=>({q,d:decision(q,quotes)})).filter(x=>x.d.eligible);
+ const buckets=new Map();
+ for(const x of valid){const groupKey=x.q.index+'|'+x.q.side;if(!buckets.has(groupKey))buckets.set(groupKey,[]);buckets.get(groupKey).push(x);}
+ const choices=Array.from(buckets,([groupKey,items])=>({groupKey,signalScore:Math.max(...items.map(x=>x.d.score)),items:items.sort((a,b)=>b.d.greekScore-a.d.greekScore)}));
+ choices.sort((a,b)=>b.signalScore-a.signalScore||b.items[0].d.greekScore-a.items[0].d.greekScore);
+ for(const group of choices){for(const {q,d} of group.items){
+  if(this.disarmed.has(q.index+'|'+q.side))continue;
+  const z=this.size(q);if(!z.qty){this.log(time,'RISK_REJECTED','Greek-ranked strike rejected: whole lot exceeds remaining risk or capital',{index:q.index,side:q.side,strike:q.strike,greekScore:d.greekScore});continue;}
+  const c={index:q.index,side:q.side,strike:q.strike,expiry:q.expiry};this.pending={contract:c,time,limit:q.ask,qty:z.qty,initialStop:z.stop,entryFacts:facts(q,d)};this.disarmed.add(q.index+'|'+q.side);this.log(time,'PAPER_LIMIT_CREATED','Pending BUY limit; no real order',{index:q.index,side:q.side,strike:q.strike,qty:z.qty,limit:q.ask,stop:z.stop,plannedRisk:z.risk,signal:this.pending.entryFacts});return;
+ }}
  }
  snapshot(){return {mode:'SYNTHETIC_OR_IMPORTED_PAPER_ONLY',sessionId:this.sessionId,capital:CFG.capital,balance:round2(CFG.capital+this.realized),realizedPnl:round2(this.realized),lossUsed:this.lossUsed,lossRemaining:round2(Math.max(0,CFG.dailyLossLimit-this.lossUsed)),locked:this.locked,approvalRequired:this.approvalRequired,position:this.position?{...this.position,entryFacts:undefined,trails:undefined}:null,pending:this.pending?{...this.pending,entryFacts:undefined}:null,groupsProcessed:this.groupsProcessed,completedTrades:this.trades.length,events:this.events.length};}
 }
